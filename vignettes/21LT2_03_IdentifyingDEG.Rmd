@@ -1,0 +1,689 @@
+---
+title: "3. Identifying DEGs comparing MUT vs WT cells of the same clonotype (21LT2)"
+author: "Friederike Dündar"
+date: "April 6; updated `r Sys.Date()`"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{3. Identifying DEGs comparing MUT vs WT cells of the same clonotype (21LT2)}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  eval=TRUE, cache=FALSE
+)
+```
+```{r libraries, message=FALSE, warning=FALSE, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(SingleCellExperiment)  
+library(ggplot2); theme_set(theme_bw(base_size = 16) )
+library(ggrepel)
+library(patchwork)
+library(Klebanoff21LT2)
+```
+
+
+```{r}
+## based on what we saw in `IdentifyingReactiveClonotype.Rmd`
+winner <- "TRA:CAGNTGTASKLTF;TRB:CASSGLAGGPVSGANVLTF"
+winner_TRB <- "TRB:CASSGLAGGPVSGANVLTF"
+non_winner <- "TRA:CAGINAGGTSYGKLTF;TRB:CASSLVPGDAYEQYF" # clonotype with negative delta IFNg
+```
+
+```{r eval=FALSE}
+cdrs21LT2 <- list(winner, winner_TRB, non_winner)
+usethis::use_data(cdrs21LT2)
+```
+
+
+# Identifying genes that are DE in MUT vs. WT cells of the same clonotype 
+
+The main goal of the bioinformatic analyses is to identify TCR clonotypes that show a selective response against the antigen presented by the APCs.
+These should include T cells that show high values for acute T cell activation, but the same clonotypes should _not_ show significant activation when exposed to the irrelevant antigen. This is how we determined the "winning" clonotype: by simply assessing the difference of IFNG levels.
+
+In principle, we're expecting three groups of T cells:
+
+* __specific responders__: higher activation in the presence of the tumor compared to the irrelevant antigen
+* __unspecific responders__: similarly high activation markers in both antigen conditions;
+* __non-responders__: no expression of activation markers.
+
+Can we see those three groups using IFNG?
+
+```{r load_data, cache=FALSE}
+## Load the SCE with the shared clonotypes
+#sce.shared <- readRDS(file = "~/Documents/Projects/2018-10_Smita/data/sce_sharedClonotypes_Mar2020.RDS")
+sce.shared <- load_21LT2shared()
+```
+
+
+```{r}
+ifng.dt <- scABC2::make_long_dt(sce.shared,
+  exprs_values = "logcounts", genes = "IFNG",
+  include_metaData=c("Sample", "id"))
+```
+
+```{r ifng_expression_all_cids, fig.show='hold', fig.height = 10, fig.width = 12}
+ggplot(ifng.dt, aes(x = Sample, y = logcounts, color = Sample)) +
+  ggbeeswarm::geom_quasirandom(alpha = .5, shape = 1, groupOnX = TRUE) +
+  facet_wrap(~id) +
+  guides(colir = FALSE) +
+  ggtitle("IFNG expression (all cells)")
+```
+
+
+We can learn a couple of things from this plot:
+
+1. Very few clonotypes are as abundantly present as C18, C20 and C53.
+
+```{r results='asis', cache=FALSE}
+data("clonotype_ids", package = "Klebanoff21LT2")
+clonotype_ids[id %in% c("C18","C20","C53")] %>% .[, -"cdr3s_aa", with=FALSE] %>%
+  unique %>% as.data.frame %>% knitr::kable(.)
+```
+
+2. C20 seems to be the one with the greatest difference in activation based on IFNG ($\Rightarrow$ corresponds to our winner TRB, too!)
+3. C18 and C53 are examples of **unspecific responders** because the IFNG levels are more or less similar in both conditions.
+
+```{r clonotype_abundance, fig.width = 9, fig.height = 4.5}
+ifng.dt[, .N, c("Sample","id")] %>%
+ ggplot(., aes(x = id, y = N, fill = Sample)) + 
+  geom_bar(stat = "identity",
+      position = position_dodge()) + 
+  coord_flip() +
+  ggtitle("Abundance of individual clonotypes") + 
+  ylab("# cells") + xlab("Clonotype ID") +
+  theme(legend.position = "bottom")
+```
+
+## Differentially expressed genes: MUT vs. WT
+
+```{r}
+#data("shared_clonotype_ids") # loading clonotype information
+sce.shared$antigen <-  factor(gsub("\\..*","",sce.shared$Sample), levels = c("WT", "MUT"), ordered = TRUE)
+```
+
+We're going to **run DE for every clonotype**, comparing MUT vs. WT. 
+`run_DE` is a wrapper function around `scran::findMarkers()`.
+
+```{r finding_markers_WT-vs-MUT, eval=FALSE}
+delist.both <- lapply( unique(sce.shared$id), function(x){
+  run_DE(
+    sce.shared[, sce.shared$id == x],
+    group_identifier = "antigen",
+    direction = "any",
+    FDR = 0.05, rank = Inf,
+    comp_name = paste0(x, "_"))
+})
+names(delist.both) <- unique(sce.shared$id)
+
+## determine those clonotypes for which the DE returned something
+#with_deg <- lapply(delist.both, function(x) !is.null(x[[2]])) %>% unlist
+#delist.both <- delist.both[with_deg] 
+
+no_NA <- sce.shared[, sce.shared$fit_for_test]$id %>% unique
+delist.both <- delist.both[no_NA]
+#usethis::use_data(delist.both[no_NA], overwrite = TRUE) ## moved to Box
+## upload the following file to Box --> KlebanoffLab_singleCellData/
+save(delist.both, file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/delist.both_21LT2.rda")
+```
+
+```{r load_DEG_results, echo=FALSE}
+#data("delist.both", package = "Klebanoff21LT2")
+load_DE_results("21LT2")
+```
+
+The only clonotypes for which DEG were detected are: `r lapply(delist.both, function(x) which(!is.null(dim(x$marker_IDs)))) %>% unlist %>% names %>% paste(., collapse = ", ")`
+
+
+### ChrisGrams: boxplots of individual genes across all shared clonotypes
+
+```{r}
+genes_of_interest <- c("IFNG","CD4","CD8A","CD8B","CD3E","TNF","IL2","IL23A")
+tt <- prep_data4tgram(sce.shared,
+  which_clonotypes = unique(sce.shared$id),
+  DEresult_list = delist.both,
+  goi = genes_of_interest)
+```
+
+```
+gns.mut <- DEresult_list[[x]][[1]]$mut
+gns.wt <- DEresult_list[[x]][[1]]$wt
+```
+
+```{r tgrams, fig.width = 11.5, fig.height = 6, warning=FALSE}
+plot_tgram(tt[gene_name == "IFNG"], dot_shape = 20, boxplot_stroke = .35,
+  col_wt = "limegreen",col_mut = "dodgerblue1", 
+  label_font_size = 10, show_legend = FALSE)
+```
+
+Let's focus on the three most abundant clonotypes:
+
+```{r tgrams_subset}
+pl <- lapply(genes_of_interest, function(x){
+  PP <- plot_tgram(tt[gene_name == x & id %in% c("C18","C20","C53")],
+    dot_size = 3, dot_shape = 20, boxplot_stroke = 1.15,
+    col_wt = "limegreen",col_mut = "dodgerblue1", 
+    label_font_size = 16, show_legend = TRUE)
+  return(PP)})
+ABCutilities::MultiPlotList(pl, cols = 4, title = "Genes of interest")
+```
+
+### "signal-noise" plots
+
+Chris wanted to see if there's a way to show that, for example, IL2 is more specifically expressed in non-reactive clonotypes compared to IFNG, which has a very high logFC in the reactive clone but is also expressed robustly in other clonotypes, irrespective of the condition.
+
+```{r signal_noise_goi_log2mean, fig.width = 9}
+goi.meanExprs <- tt[ id != "C20", mean((2^logcounts)-1), by = "gene_name"]
+setnames(goi.meanExprs, "V1","mean.norm.expression")
+
+goi.logFC_C20 <- as.data.frame(delist.both$C20$findMarkers_results$MUT) %>% 
+  as.data.table(., keep.rownames = TRUE) %>% .[rn %in% genes_of_interest]
+setnames(goi.logFC_C20, "rn", "gene_name")
+goi.logFC_C20$sign.DE <- ifelse(goi.logFC_C20$gene_name %in% delist.both$C20$marker_IDs$gene_symbol, TRUE, FALSE)
+
+## plot
+goi.meanExprs[goi.logFC_C20, on = "gene_name"] %>%
+  ggplot(., aes(y = logFC.WT, x = log2(mean.norm.expression), key = gene_name)) +
+  geom_point(size = 4, aes(color = sign.DE, shape = sign.DE)) + 
+  ggrepel::geom_label_repel(aes(label = gene_name)) +
+  ylab("logFC(MUT/WT) [C20]") + xlab("log2(avg. norm. expression)\n[across all cells with shared clonotypes except C20]") +
+  ggtitle("General expression strength of genes that strongly change in C20") +
+  geom_hline(yintercept = 0, linetype="dashed", color = "grey50") +
+  geom_vline(xintercept = 0, linetype="dashed", color = "grey50") +
+  scale_shape_manual(values = c(17,16))
+  
+```
+
+This plot depicts that IFNG (a) has the highest logFC of the DE genes in C20 and (b) it is strongly expressed in all other clonotypes as well.
+*CD3E*, on the other hand, is also strongly expressed across all clonotypes, but does not show a big difference in C20-WT compared to C20-MUT.
+*IL2* is an example of a gene that has a high logFC in C20, but it is rather weakly expressed across all other clonotypes.
+
+
+Let's do it for all DEG of C20!
+
+```{r signal_noise_DEG_C20, fig.width = 6, fig.show = "hold", fig.height = 6}
+deg.logFC_C20 <- as.data.frame(delist.both$C20$findMarkers_results$MUT) %>%
+  as.data.table(., keep.rownames = TRUE) %>% .[FDR <= 0.05]
+setnames(deg.logFC_C20, "rn", "gene_name")
+
+deg.meanExprs <- scABC2::make_long_dt(sce.shared, 
+  genes = unique(deg.logFC_C20$gene_name),
+  exprs_values = "logcounts",
+  include_metaData = "id") %>% 
+  .[id != "C20", mean((2^logcounts)-1), by = c("gene_name")]
+setnames(deg.meanExprs, "V1","mean.norm.expression")
+
+## plot
+degs <- deg.meanExprs[deg.logFC_C20, on = "gene_name"]
+ymax <- max(abs(degs$logFC.WT))
+ymin <- -1 * ymax
+
+ggplot(degs, aes(y = logFC.WT, x = log2(mean.norm.expression), key = gene_name, fill = -log10(FDR))) +
+  geom_point(alpha = .7, size = 4, shape = 21) + 
+  ggrepel::geom_label_repel(data = degs[ (logFC.WT >= 2.5) |  -log10(FDR) >= 20 |
+      (logFC.WT >= 2 & log2(mean.norm.expression) > 5) | 
+      (logFC.WT < 0 & log2(mean.norm.expression) > 5) ],
+    aes(label = gene_name)) +
+  ylab("logFC(MUT/WT) [C20]") + 
+  xlab("log2(avg. norm. expression)\n[across all cells with shared clonotypes except C20]") +
+  ggtitle("All DEG for MUT/WT in C20") +
+  scale_fill_gradientn(colours = c("lightskyblue1","orchid1","firebrick3"))+
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  theme(legend.position = "bottom")
+```
+
+
+```{r signal_noise_DEG_C20_geometricMean, fig.width = 6, fig.height = 6, fig.show = "hold"}
+deg.logFC_C20 <- as.data.frame(delist.both$C20$findMarkers_results$MUT) %>%
+  as.data.table(., keep.rownames = TRUE) %>% .[FDR <= 0.01]
+setnames(deg.logFC_C20, "rn", "gene_name")
+
+deg.meanExprs2 <- scABC2::make_long_dt(sce.shared, 
+  genes = unique(deg.logFC_C20$gene_name),
+  exprs_values = "logcounts",
+  include_metaData = "id") %>% 
+  .[id != "C20", 2^mean(logcounts), by = c("gene_name")]
+setnames(deg.meanExprs2, "V1","geometric.mean")
+
+## plot
+degs2 <- deg.meanExprs2[deg.logFC_C20, on = "gene_name"]
+ymax <- max(abs(degs2$logFC.WT))
+ymin <- -1 * ymax
+
+ggplot(degs2, aes(y = logFC.WT, x = log(geometric.mean), key = gene_name, fill = -log10(FDR))) +
+  geom_point(alpha = .7, size = 4, shape = 21) + 
+  ggrepel::geom_label_repel(data = degs2[ (logFC.WT >= 2.5 | geometric.mean > 25 | -log10(FDR) >= 20)],
+    aes(label = gene_name)) +
+  ylab("logFC(MUT/WT) [C20]") + 
+  xlab("log of geometric mean of norm. expression\n[across all cells with shared clonotypes except C20]") +
+  ggtitle("All DEG for MUT/WT in C20") +
+  scale_fill_gradientn(colours = c("lightskyblue1","orchid1","firebrick3"))+
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  theme(legend.position = "bottom")
+```
+
+# Enrichment analyses
+
+```{r include=FALSE, cache=FALSE}
+library(clusterProfiler)
+library(ggplot2);theme_set(theme_bw(base_size = 14) )
+```
+
+Possible gene sets of interest:
+
+* KEGG_T_CELL_RECEPTOR_SIGNALING_PATHWAY
+* PID_CD8_TCR_PATHWAY
+* PID_TCR_PATHWAY
+* BIOCARTA_TCR_PATHWAY
+* REACTOME_TCR_SIGNALING
+
+```{r}
+## extract_logFC
+degns.c20 <- delist.both[["C20"]]$findMarkers_results$MUT %>%
+  as.data.frame %>% as.data.table(., keep.rownames=TRUE)
+setnames(degns.c20, "rn","gene_symbol")
+
+# For the comparison with the publicly available gene sets, we'll use the Entrez IDs.
+##  retrieve_entrez_ids
+eg <-  clusterProfiler::bitr(degns.c20$gene_symbol,
+  fromType="SYMBOL", toType="ENTREZID",
+  OrgDb="org.Hs.eg.db") %>% as.data.table
+setnames(eg, names(eg), c("gene_symbol", "ENTREZID"))
+degns.c20 <- eg[degns.c20, on = "gene_symbol"]
+```
+
+For GSEA, we need a vector of *all* genes with the respective logFCs.
+This can also be used to color the enrichment plots down the line.
+
+```{r get_ranks_prep}
+degns.c20.rnks <- get_ranks(degns.c20, rank_by = "logFC.WT")
+```
+
+## ORA {.tabset}
+
+Over-representation analysis depends on a simple comparison of two lists of gene names. 
+One list contains the DEG for the C20 comparison of MUT/WT cells, the other list corresponds to a specific gene set.
+
+There are numerous collections of gene sets, the most popular include the ones provided by the Broad's MSigDB, such as
+"HALLMARK" gene sets, KEGG pathways, pathways defined by REACTOME etc.
+
+The following sections show the results for the simple ORA using different collections of gene sets.
+
+
+### Hallmark gene sets
+
+```{r ora_hallmark, cache=TRUE}
+## MSigDB Hallmark gene set
+#gs <- system.file("extdata", "h.all.v7.0.entrez.gmt", package = "KlebanoffVDJData2020")
+gs <- system.file("extdata", "h.all.v7.0.entrez.gmt", package = "Klebanoff21LT2", mustWork = TRUE)
+hmgs <- clusterProfiler::read.gmt(gs)
+
+## test for enrichment
+ora_hallmark <- clusterProfiler::enricher(degns.c20[FDR <= 0.05]$ENTREZID,
+  TERM2GENE = hmgs)
+ora_hallmark <- DOSE::setReadable(ora_hallmark, 'org.Hs.eg.db', 'ENTREZID')
+```
+
+```{r ora_hallmark_dotplot, fig.width = 10, fig.height = 4.5, warning=FALSE, message=FALSE}
+dotplot(ora_hallmark) + 
+  ggtitle("Overrepresented MSigDB Hallmark gene sets (C20)") +
+  scale_color_gradientn(colours =rev(c("darksalmon",
+    "firebrick3", "firebrick4")), limits = c(0, 0.05))
+```
+
+```{r ora_hallmark_cnet, fig.width = 15, fig.height = 11, warning=FALSE, message=FALSE}
+cnetplot(ora_hallmark,
+  foldChange = degns.c20.rnks, colorEdge = TRUE) +
+  ggtitle("Top 5 overrepresented Hallmark gene sets") +
+  scale_color_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue1", mid = "cornsilk1", high = "firebrick3", midpoint = 0)
+```
+
+```{r ora_hallmark_heatplot, fig.width = 13, fig.height = 4.5, warning=FALSE, message=FALSE}
+heatplot(ora_hallmark,
+  foldChange=degns.c20.rnks, showCategory = 5) +
+  ggtitle("Individual genes of the top 5 overrepresented Hallmark gene sets") +
+  scale_fill_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue2", mid = "cornsilk1",
+    high = "firebrick4", midpoint = 0) +
+    theme(legend.position = "bottom")
+```
+
+
+### KEGG
+
+```{r ora_kegg, cache=TRUE}
+## MSigDB KEGG gene set
+gs <- system.file("extdata", "c2.cp.kegg.v7.0.entrez.gmt", package = "Klebanoff21LT2")
+hmgs <- clusterProfiler::read.gmt(gs)
+ora_kegg <- clusterProfiler::enricher(degns.c20[FDR <= 0.05]$ENTREZID, TERM2GENE = hmgs)
+ora_kegg <- DOSE::setReadable(ora_kegg, 'org.Hs.eg.db', 'ENTREZID')
+```
+
+```{r ora_kegg_dotplot, fig.width = 10, fig.height = 4.5, warning=FALSE, message=FALSE}
+dotplot(ora_kegg) + 
+  ggtitle("Overrepresented MSigDB KEGG gene sets (C20)") +
+  scale_color_gradientn(colours =rev(c("darksalmon",
+    "firebrick3", "firebrick4")), limits = c(0, 0.05))
+```
+
+```{r ora_kegg_cnet, fig.width = 15, fig.height = 12, warning=FALSE, message=FALSE}
+cnetplot(ora_kegg,
+  foldChange = degns.c20.rnks, colorEdge = TRUE) +
+  ggtitle("Top 5 overrepresented KEGG gene sets") +
+  scale_color_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue1", mid = "cornsilk1", high = "firebrick3", midpoint = 0)
+```
+
+```{r ora_kegg_heatplot, fig.width = 13, fig.height = 4.5, warning=FALSE, message=FALSE}
+heatplot(ora_kegg,
+  foldChange=degns.c20.rnks, showCategory = 5) +
+  ggtitle("Individual genes of the top 5 overrepresented KEGG gene sets") +
+  scale_fill_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue2", mid = "cornsilk1",
+    high = "firebrick4", midpoint = 0) +
+    theme(legend.position = "bottom")
+```
+
+### REACTOME
+
+```{r ora_reactome, cache=TRUE}
+## MSigDB REACTOME gene set
+gs <- system.file("extdata", "c2.cp.reactome.v7.0.entrez.gmt", 
+  package = "Klebanoff21LT2", mustWork = TRUE)
+hmgs <- clusterProfiler::read.gmt(gs)
+ora_react <- clusterProfiler::enricher(degns.c20[FDR <= 0.05]$ENTREZID, TERM2GENE = hmgs)
+ora_react <- DOSE::setReadable(ora_react, 'org.Hs.eg.db', 'ENTREZID')
+```
+
+```{r ora_react_dotplot, fig.width = 10, fig.height = 4.5, warning=FALSE, message=FALSE}
+dotplot(ora_react) + 
+  ggtitle("Overrepresented MSigDB REACTOME gene sets (C20)") +
+  scale_color_gradientn(colours =rev(c("darksalmon",
+    "firebrick3", "firebrick4")), limits = c(0, 0.05))
+```
+
+```{r ora_react_cnet, fig.width = 15, fig.height = 12, warning=FALSE, message=FALSE}
+cnetplot(ora_react,
+  foldChange = degns.c20.rnks, colorEdge = TRUE) +
+  ggtitle("Top 5 overrepresented REACTOME gene sets") +
+  scale_color_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue1", mid = "cornsilk1", high = "firebrick3", 
+    midpoint = 0)
+```
+
+```{r ora_react_heatplot, fig.width = 11, fig.height = 4.5, warning=FALSE, message=FALSE}
+heatplot(ora_react,
+  foldChange=degns.c20.rnks, showCategory = 5) +
+  ggtitle("Individual genes of the top 5 overrepresented REACTOME gene sets") +
+  scale_fill_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue2", mid = "cornsilk1",
+    high = "firebrick4", midpoint = 0) +
+    theme(legend.position = "bottom")
+```
+
+### PID
+
+```{r ora_pid, cache=TRUE}
+## MSigDB REACTOME gene set
+gs <- system.file("extdata", "c2.cp.pid.v7.0.entrez.gmt",
+  package = "Klebanoff21LT2", mustWork=TRUE)
+hmgs <- clusterProfiler::read.gmt(gs)
+ora_pid <- clusterProfiler::enricher(degns.c20[FDR <= 0.05]$ENTREZID, TERM2GENE = hmgs)
+ora_pid <- DOSE::setReadable(ora_pid, 'org.Hs.eg.db', 'ENTREZID')
+```
+
+```{r ora_pid_dotplot, fig.width = 10.5, fig.height = 4.5, warning=FALSE, message=FALSE}
+dotplot(ora_pid) + 
+  ggtitle("Overrepresented MSigDB PID gene sets (C20)") +
+  scale_color_gradientn(colours =rev(c("darksalmon",
+    "firebrick3", "firebrick4")), limits = c(0, 0.05))
+```
+
+```{r ora_pid_cnet, fig.width = 12, fig.height = 10, warning=FALSE, message=FALSE}
+cnetplot(ora_pid,
+  foldChange = degns.c20.rnks, colorEdge = TRUE) +
+  ggtitle("Top 5 overrepresented PID gene sets") +
+  scale_color_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue1", mid = "cornsilk1", high = "firebrick3", 
+    midpoint = 0)
+```
+
+```{r ora_pid_heatplot, fig.width = 10, fig.height = 4.5, warning=FALSE, message=FALSE}
+heatplot(ora_pid,
+  foldChange=degns.c20.rnks, showCategory = 5) +
+  ggtitle("Individual genes of the top 5 overrepresented PID gene sets") +
+  scale_fill_gradient2(name = "logFC(mut/wt)\nC20", 
+    low = "blue2", mid = "cornsilk1",
+    high = "firebrick4", midpoint = 0) +
+    theme(legend.position = "bottom")
+```
+
+## GSEA
+
+```{r gsea_prep, message=FALSE}
+library(fgsea)
+```
+
+### REACTOME
+
+```{r gsea_reactome, eval=FALSE}
+## REACTOME
+library(reactome.db)
+### retrieve pathways
+pw_reactome <- fgsea::reactomePathways(genes = degns.c20$ENTREZID)
+
+## run FGSEA
+fgsea_reactome_degns.c20  <- fgsea(pathways = pw_reactome, 
+  stats = degns.c20.rnks,
+  minSize = 15, maxSize = 500, nperm = 100000)
+
+usethis::use_data(fgsea_reactome_degns.c20, overwrite = TRUE)
+```
+
+```{r load_fgsea_reactome}
+## fgsea_reactome
+data("fgsea_reactome_degns.c20", package = "Klebanoff21LT2", mustWork=TRUE) 
+### retrieve pathways
+library(reactome.db)
+pw.reactome <- fgsea::reactomePathways(genes = degns.c20$ENTREZID)
+# the most significant pathway
+fgsea_reactome_degns.c20[order(pval),][1,]
+```
+
+```{r fgsea_react_results, fig.width = 13, fig.height = 10}
+topPWs <- extract_top_pw(fgsea_reactome_degns.c20, n_pw = 5,
+  direction = "both", p_adj_threshold = 0.01)
+
+plotGseaTable(pw.reactome[topPWs], degns.c20.rnks,
+  fgsea_reactome_degns.c20, 
+  gseaParam = 0.5)
+```
+
+### KEGG
+
+```{r gsea_KEGG, eval=FALSE}
+## KEGG
+
+### clusterProfiler-way of doing FGSEA -- will produce
+### a different kind of object, i.e. one that can be used
+### with the usual clusterProfiler visualization functions
+#fgsea_kegg_degns.c20 <- clusterProfiler::gseKEGG(
+#  geneList = degns.c20.rnks,
+#  organism = 'hsa', nPerm = 1000, minGSSize = 120,
+#  pvalueCutoff = 0.05, verbose  = FALSE,
+#  by = "fgsea")
+
+### FGSEA direct
+gs <- system.file("extdata", "c2.cp.kegg.v7.0.entrez.gmt",
+  package = "Klebanoff21LT2", mustWork = TRUE)
+
+pw.kegg <- fgsea::gmtPathways(gs)
+fgsea_kegg_degns.c20  <- fgsea(
+  pathways = pw.kegg, 
+  stats = degns.c20.rnks,
+  minSize = 15, maxSize = 500, nperm = 100000)
+
+usethis::use_data(fgsea_kegg_degns.c20, overwrite = TRUE)
+```
+
+```{r load_kegg_fgsea, cache=FALSE}
+gs <- system.file("extdata", "c2.cp.kegg.v7.0.entrez.gmt", package = "Klebanoff21LT2", mustWork = TRUE)
+pw.kegg <- fgsea::gmtPathways(gs)
+## fgsea_kegg_degns.c20
+data("fgsea_kegg_degns.c20", package = "Klebanoff21LT2")
+```
+
+```{r fgsea_kegg_results, fig.width = 11, fig.height = 10}
+fgsea_res <- fgsea_kegg_degns.c20
+pws <- pw.kegg
+topPWs <- extract_top_pw(fgsea_res, n_pw = 5,
+  direction = "both", p_adj_threshold = 0.01)
+plotGseaTable(pws[topPWs], degns.c20.rnks,
+  fgseaRes = fgsea_res, gseaParam = 0.5)
+```
+
+```{r fgsea_kegg_TCR_PW, fig.width = 10, fig.height = 4}
+plotGseaTable(pws["KEGG_T_CELL_RECEPTOR_SIGNALING_PATHWAY"],
+  degns.c20.rnks,
+  fgseaRes = fgsea_res, gseaParam = 0.5)
+```
+
+### PID
+
+```{r fgsea_pid, eval=FALSE}
+gs <- system.file("extdata", "c2.cp.pid.v7.0.entrez.gmt",
+  package = "Klebanoff21LT2", mustWork=TRUE)
+pw.pid <- fgsea::gmtPathways(gs)
+fgsea_pid_degns.c20  <- fgsea(
+  pathways = pw.pid, 
+  stats = degns.c20.rnks,
+  minSize = 15, maxSize = 500, nperm = 100000)
+
+usethis::use_data(fgsea_pid_degns.c20, overwrite = TRUE)
+```
+
+```{r load_pid_fgsea_results}
+gs <- system.file("extdata", "c2.cp.pid.v7.0.entrez.gmt",
+  package = "Klebanoff21LT2", mustWork=TRUE)
+pw.pid <- fgsea::gmtPathways(gs)
+data("fgsea_pid_degns.c20",  package = "Klebanoff21LT2")
+```
+
+```{r fgsea_pid_results, fig.width = 11, fig.height = 10}
+fgsea_res <- fgsea_pid_degns.c20
+pws <- pw.pid
+topPWs <- extract_top_pw(fgsea_res, n_pw = 5,
+  direction = "both", p_adj_threshold = 0.01)
+plotGseaTable(pws[topPWs], degns.c20.rnks,
+  fgseaRes = fgsea_res, gseaParam = 0.5)
+```
+
+
+------------------
+
+# Saving tables for Chris
+
+
+```{r DEG_saved_for_chris, eval=FALSE}
+with_deg <- lapply(delist.both, function(x) !is.null(x[[2]])) %>% unlist
+## will save them all in one xlsx collection of spreadsheets
+outl <- lapply(names(delist.both), function(x){
+  degns <- delist.both[[x]]$findMarkers_results$MUT %>% as.data.frame %>%
+    as.data.table(., keep.rownames="gene_symbol")
+  degns[, neglog10.pVal := -1*log10(p.value)]
+  degns[, neglog10.FDR := -1*log10(FDR)]
+  return(data.frame(degns))
+})
+names(outl) <- paste(names(delist.both), "DEG_Mut-vs-Wt", sep = "_")
+
+## add basic information about the clonotypes
+cinfo <-  clonotype_ids[id %in% names(delist.both)] 
+setnames(cinfo, c("MUT.21LT2", "WT.21LT2"), c("n_cells_in_MUT", "n_cells_in_WT"))
+setorder(cinfo, id)
+outl$clonotype_info <- data.frame(cinfo)
+  
+openxlsx::write.xlsx(outl,
+  file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/DEgenes_21LT2.xlsx")
+```
+
+```{r exprs_vals_saved, eval=FALSE}
+goi <- c("CD8A","CD3E","CD4")
+outl2 <- lapply(goi, function(x){
+  scABC2::make_long_dt(sce.shared, genes = x,
+    include_metaData = c("Sample","id"))
+})
+names(outl2) <- goi
+openxlsx::write.xlsx(outl2,
+  file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/logcounts_TcellMarkers_21LT2.xlsx")
+```
+
+
+```{r saved_for_chris_priorToApril, eval=FALSE}
+## C20
+degns.c20[, neglog10.pVal := -1*log10(p.value)]
+degns.c20[, neglog10.FDR := -1*log10(FDR)]
+write.table(as.data.frame(degns.c20), quote = F, sep = "\t", row.names=F,
+  file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/DEgenes_21LT2_C20_mut_vs_wt.txt")
+
+degns.c18 <- delist.both[["C18"]]$findMarkers_results$MUT %>%
+  as.data.frame %>% as.data.table(., keep.rownames="gene_symbol")
+degns.c18[, neglog10.pVal := -1*log10(p.value)]
+degns.c18[, neglog10.FDR := -1*log10(FDR)]
+as.data.frame(degns.c18) %>% 
+  write.table(, quote = F, sep = "\t", row.names=F,
+  file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/DEgenes_21LT2_C18_mut_vs_wt.txt")
+
+degns.c53 <- delist.both[["C53"]]$findMarkers_results$MUT %>%
+  as.data.frame %>% as.data.table(., keep.rownames="gene_symbol")
+degns.c53[, neglog10.pVal := -1*log10(p.value)]
+degns.c53[, neglog10.FDR := -1*log10(FDR)]
+as.data.frame(degns.c53) %>% 
+  write.table(, quote = F, sep = "\t", row.names=F,
+  file = "~/Documents/Projects/2018-10_Smita/2020-03_reprocessing_21LT2/DEgenes_21LT2_C53_mut_vs_wt.txt")
+
+```
+
+
+```{r eval=FALSE}
+## saving enrichment results as tables
+write.table(as.data.frame(ora_hallmark), quote =F, row.names = F,
+  sep = ",", file = "~/Documents/Projects/2018-10_Smita/data/degC20_ora_hallmark.csv")
+
+write.table(as.data.frame(ora_kegg), quote =F, row.names = F,
+  sep = ",", file = "~/Documents/Projects/2018-10_Smita/data/degC20_ora_kegg.csv")
+```
+
+```
+# Previously saved for Chris
+## table of tgrams
+dcast(tt, gene_name ~ cell + Sample, value.var = "logcounts") %>%
+  as.data.frame %>% write.table(., quote = F, row.names =F, col.names = T, sep = ",",
+    file = "~/Documents/Projects/2018-10_Smita/data/logcountsPerCell_IFNG_et_al.csv")
+
+## table of 'signal-noise-plots'
+write.table(as.data.frame(degs), 
+  file = "~/Documents/Projects/2018-10_Smita/data/DEG-C20_mean-norm-expression.csv",
+  row.names = F, quote = F, sep = ",")
+
+write.table(as.data.frame(degs2), 
+  file = "~/Documents/Projects/2018-10_Smita/data/DEG-C20_geoMean-norm-expression.csv",
+  row.names = F, quote = F, sep = ",")
+```
+
+-------------
+
+```{r}
+sessionInfo()
+```
+
