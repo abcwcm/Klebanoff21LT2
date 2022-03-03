@@ -25,4 +25,4 @@ Klebanoff21LT2::load_DE_results() # loads an object named `delist.both`
 de.21 <- delist.both; rm(delist.both)
 ```
 
-For more details, see the [code repository](https://github.com/abcwcm/Chandran2021).
+For more details, see the [code repository](https://github.com/abcwcm/Chandran2021) and the `Rmd` files detailing how the data underlying the figures were obtained.
